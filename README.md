@@ -48,6 +48,7 @@ Then connect to `localhost:25565` with a Minecraft **26.1.2** client.
 
 - **Lightbulb** (BL602 MCU) — implementation details [here](https://github.com/vimpop/UCraft-bl602)
 - **Samsung C410W Printer** (ARM BE MCU) - implementation details [here](https://github.com/vimpop/UCraft-printer)
+- **Italian ISP Router** (Broadcom BCM63138) - implementation details [here](https://github.com/ZioCook/UCraft/tree/be2b5235e73acf73aa5cbaa9e456819cb0f58850) by [ZioCook](https://github.com/ZioCook)
 
 *Your implementation could also be here! (feel free to open up a issue with your implementation)*
 

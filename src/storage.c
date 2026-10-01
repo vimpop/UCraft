@@ -63,7 +63,7 @@ void storageInventoryUpdateSlot(player_t *currentPlayer, int16_t slot, int16_t c
         return;
     }
 
-    if (slot >= 0 && slot <= INVENTORY_SIZE)
+    if (slot >= 0 && slot < INVENTORY_SIZE)
     {
         // player updated the crafting fields
         if (slot >= 1 && slot <= 4)
@@ -100,7 +100,7 @@ void storageInventoryGetSlot(player_t *currentPlayer, int16_t slot, inventory_sl
         return;
     }
 
-    if (slot >= 0 && slot <= INVENTORY_SIZE)
+    if (slot >= 0 && slot < INVENTORY_SIZE)
     {
         selected_slot->count = storage->inventory_slots[slot].count;
         selected_slot->item_id = storage->inventory_slots[slot].item_id;
@@ -115,7 +115,7 @@ void storageInventoryInsertItem(player_t *currentPlayer, int32_t item_id, int16_
     {
         return;
     }
-    if (count == 0)
+    if (count <= 0 || item_id == 0)
     {
         // nothing to insert
         return;
@@ -199,4 +199,5 @@ void storageInventoryCleanup()
         U_free(storage);
         storage = tmp;
     }
+    storageHead = NULL;
 }

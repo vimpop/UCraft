@@ -44,7 +44,7 @@ void StatusS2Cpong(player_t *currentPlayer)
 
   sendStart();
   sendByte(0x01);
-  sendBuffer(currentPlayer->name, 8);
+  sendBuffer(currentPlayer->ping_payload, sizeof(currentPlayer->ping_payload));
   sendDone();
 }
 // Login packets

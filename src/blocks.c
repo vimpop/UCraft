@@ -227,7 +227,7 @@ void blocksCleanup()
 
 static Block *get_block(Blocks *blocks, uint8_t x, int16_t y, uint8_t z, size_t *block_index)
 {
-    uint32_t coord_hash = x | z << 8 | y << 16;
+    uint32_t coord_hash = (uint32_t)x | ((uint32_t)z << 8) | ((uint32_t)(uint16_t)y << 16);
 
     if (blocks == NULL)
     {
@@ -251,8 +251,8 @@ bool blocksUpdate(blocksDefaultState state, int32_t x, int16_t y, int32_t z)
 {
     int32_t chunk_x = x >> 4;
     int32_t chunk_z = z >> 4;
-    uint8_t local_x = (uint8_t)(x - (chunk_x << 4));
-    uint8_t local_z = (uint8_t)(z - (chunk_z << 4));
+    uint8_t local_x = (uint8_t)((uint32_t)x & 15u);
+    uint8_t local_z = (uint8_t)((uint32_t)z & 15u);
     uint32_t terrain_state = worldGetBlock(x, y, z);
 
     Blocks *blocks = coordmap_get(chunk_x, chunk_z);
@@ -342,8 +342,8 @@ int32_t blocksGetBlock(int32_t x, int16_t y, int32_t z)
 {
     int32_t chunk_x = x >> 4;
     int32_t chunk_z = z >> 4;
-    uint8_t local_x = (uint8_t)(x - (chunk_x << 4));
-    uint8_t local_z = (uint8_t)(z - (chunk_z << 4));
+    uint8_t local_x = (uint8_t)((uint32_t)x & 15u);
+    uint8_t local_z = (uint8_t)((uint32_t)z & 15u);
     Blocks *blocks = blocksGet(chunk_x, chunk_z);
     if (blocks != NULL)
     {

@@ -18,6 +18,7 @@ env:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
 
     strategy:
       fail-fast: false
@@ -52,6 +53,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set reusable strings
         id: strings
@@ -67,6 +70,8 @@ jobs:
           -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
           -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DBUILD_TESTING=ON
+          -DUCRAFT_TCP_TESTS=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
           -S ${{ github.workspace }}
 
       - name: Build
@@ -74,7 +79,19 @@ jobs:
 
       - name: Test
         working-directory: ${{ steps.strings.outputs.build-output-dir }}
-        run: ctest --build-config ${{ matrix.build_type }}
+        run: ctest --build-config ${{ matrix.build_type }} --output-on-failure --no-tests=error --output-junit test-results.xml
+
+      - name: Upload test results and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ runner.os }}-${{ matrix.c_compiler }}
+          path: |
+            build/test-results.xml
+            build/Testing/Temporary/*.log
+            build/tests/server-smoke.log
+          if-no-files-found: warn
+          retention-days: 7
 
       # --- Collect just the binary and rename it per platform/compiler ---
       - name: Stage binary (Windows)
@@ -84,11 +101,11 @@ jobs:
           $buildDir = "${{ steps.strings.outputs.build-output-dir }}\src\Release"
           $outDir   = "${{ steps.strings.outputs.staging-dir }}"
           New-Item -ItemType Directory -Force -Path $outDir | Out-Null
-          $exe = Get-ChildItem -Path $buildDir -Filter *.exe -File | Select-Object -First 1
-          if (-not $exe) { throw "No .exe found in $buildDir" }
+          $exe = Join-Path $buildDir "UCraft.exe"
+          if (-not (Test-Path $exe)) { throw "UCraft.exe not found in $buildDir" }
           $dest = Join-Path $outDir "${{ steps.strings.outputs.artifact-name }}.exe"
-          Copy-Item $exe.FullName $dest -Force
-          Write-Host "Staged $($exe.Name) -> $dest"
+          Copy-Item $exe $dest -Force
+          Write-Host "Staged UCraft.exe -> $dest"
       - name: Stage binary (Linux & macOS)
         if: runner.os == 'Linux' || runner.os == 'macOS'
         shell: bash
@@ -97,12 +114,8 @@ jobs:
           build_dir="${{ steps.strings.outputs.build-output-dir }}/src"
           out_dir="${{ steps.strings.outputs.staging-dir }}"
           mkdir -p "$out_dir"
-          # pick the first executable regular file in build/src, excluding shared libs
-          bin_path="$(find "$build_dir" -maxdepth 1 -type f -exec test -x {} \; ! -name '*.so' ! -name '*.dylib' -print | head -n 1 || true)"
-          if [[ -z "${bin_path}" ]]; then
-            echo "No executable found in $build_dir" >&2
-            exit 1
-          fi
+          bin_path="$build_dir/UCraft"
+          test -x "$bin_path"
           dest="${out_dir}/${{ steps.strings.outputs.artifact-name }}"
           cp -f "$bin_path" "$dest"
           chmod +x "$dest"
@@ -116,9 +129,42 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  sanitizers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Configure with sanitizers
+        run: >
+          cmake -S . -B build
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+          -DUCRAFT_TCP_TESTS=ON -DUCRAFT_SANITIZERS=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure --no-tests=error --output-junit test-results.xml
+      - name: Upload test results and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-Linux-sanitizers
+          path: |
+            build/test-results.xml
+            build/Testing/Temporary/*.log
+            build/tests/server-smoke.log
+          if-no-files-found: warn
+          retention-days: 7
+
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: build
+    needs: [build, sanitizers]
     runs-on: ubuntu-latest
 
     steps:
@@ -126,6 +172,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: UCraft-*
           merge-multiple: true
 
       - name: List downloaded files (debug)

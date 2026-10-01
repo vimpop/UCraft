@@ -34,6 +34,42 @@ This produces an executable named `UCraft` in `build/src`.
 
 Pre-built binaries are also available as artifacts of the [GitHub Actions](https://github.com/vimpop/UCraft/actions) workflow runs.
 
+## Regression tests
+
+The CTest suite compiles the real gameplay, inventory, and block-storage code.
+Tests use fixed fixtures and recorded messages, so they need no Minecraft client
+or account.
+
+Run the portable suite on Linux, macOS, or Windows:
+
+```bash
+git submodule update --init --recursive
+cmake -S . -B build/test -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build/test --config Release --parallel
+ctest --test-dir build/test -C Release --output-on-failure --no-tests=error
+```
+
+On Linux, add `-DUCRAFT_TCP_TESTS=ON` to include the Python TCP smoke test. It
+checks status, ping, malformed frames, concurrent clients, and graceful shutdown.
+The test uses port 25565 by default and does not contact Mojang.
+
+For memory and undefined-behavior checks on Linux:
+
+```bash
+cmake -S . -B build/sanitizers -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DUCRAFT_TCP_TESTS=ON -DUCRAFT_SANITIZERS=ON
+cmake --build build/sanitizers --parallel
+ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+  ctest --test-dir build/sanitizers --output-on-failure --no-tests=error
+```
+
+The GitHub Actions matrix runs the suite with GCC, Clang, and MSVC, plus Linux
+sanitizers. JUnit results and logs are uploaded as artifacts. Use
+`-DBUILD_TESTING=OFF` to build only the server.
+
+Add gameplay cases in `tests/game_tests.c` and register new names in
+`tests/CMakeLists.txt`.
+
 ## Running
 
 ```bash

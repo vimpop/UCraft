@@ -48,14 +48,7 @@ void gameGlobalTick()
     }
     if ((main_tick % ((1000 / TICK_TIME_MS) * 1)) == 0) // should be every second
     {
-        if (gameData.time < 24000)
-        {
-            gameData.time += 20;
-        }
-        else
-        {
-            gameData.time = 0;
-        }
+        gameData.time = (gameData.time + 20) % 24000;
     }
 }
 // fired every tick in the global context for the current player {so it will replicate for others}
@@ -275,12 +268,12 @@ void gamePlayerLocalTick(player_t *currentPlayer)
                     }
                 }
 
-                PlayS2Copenscreen(currentPlayer, 1, 12, "Crafting");
+                PlayS2Copenscreen(currentPlayer, 1, WINDOW_CRAFTING, "Crafting");
             }
             else
             {
                 currentPlayer->gamePlayerData.block_state = minecraft_block_state_from_item(slot.item_id);
-                if (currentPlayer->gamePlayerData.block_state)
+                if (currentPlayer->gamePlayerData.block_state && slot.count > 0)
                 {
                     if (slot.count)
                     {
@@ -319,6 +312,7 @@ void gamePlayerLocalTick(player_t *currentPlayer)
                     blocksUpdate(currentPlayer->gamePlayerData.block_state, currentPlayer->gamePlayerData.block_x, currentPlayer->gamePlayerData.block_y, currentPlayer->gamePlayerData.block_z);
                     PlayS2Cblock(currentPlayer->gamePlayerData.block_state, currentPlayer->gamePlayerData.block_x, currentPlayer->gamePlayerData.block_y, currentPlayer->gamePlayerData.block_z);
                     PlayS2Cblockchangeack(currentPlayer, currentPlayer->gamePlayerData.block_sequence);
+                    currentPlayer->gamePlayerData.block_update_event = 1;
                 }
             }
         }
@@ -433,9 +427,9 @@ void gamePlayerLocalTick(player_t *currentPlayer)
             blocksUpdate(currentPlayer->gamePlayerData.block_state, currentPlayer->gamePlayerData.block_x, currentPlayer->gamePlayerData.block_y, currentPlayer->gamePlayerData.block_z);
             PlayS2Cblock(currentPlayer->gamePlayerData.block_state, currentPlayer->gamePlayerData.block_x, currentPlayer->gamePlayerData.block_y, currentPlayer->gamePlayerData.block_z);
             PlayS2Cblockchangeack(currentPlayer, currentPlayer->gamePlayerData.block_sequence);
+            currentPlayer->gamePlayerData.block_update_event = 1;
         }
 
-        currentPlayer->gamePlayerData.block_update_event = 1;
         currentPlayer->gamePlayerData.action_item_event = 0;
     }
 }

@@ -15,7 +15,7 @@
 #include "lwjson/lwjson.h"
 #include "wrapper.h"
 
-static httpsData_t httpsData;
+static httpsData_t httpsData = {.net = {.fd = -1}, .connection_closed = 1};
 static struct sockaddr_in auth_server;
 
 #ifdef MBEDTLS_DEBUG_C
@@ -32,13 +32,14 @@ static void httpsClose()
         return;
     }
 
-    int ret;
-    do
+    // Best-effort nonblocking closure; never spin on WANT_WRITE.
+    mbedtls_ssl_close_notify(&httpsData.ssl);
+    if (httpsData.net.fd >= 0)
     {
-        ret = mbedtls_ssl_close_notify(&httpsData.ssl);
-    } while (ret == MBEDTLS_ERR_SSL_WANT_WRITE);
-    U_shutdown(httpsData.net.fd, SHUT_RDWR);
-    U_close(httpsData.net.fd);
+        U_shutdown(httpsData.net.fd, SHUT_RDWR);
+        U_close(httpsData.net.fd);
+        httpsData.net.fd = -1;
+    }
     mbedtls_ssl_free(&httpsData.ssl);
     mbedtls_ssl_config_free(&httpsData.conf);
     httpsData.connection_closed = 1;
@@ -104,6 +105,7 @@ int httpsConnect(player_t *currentPlayer, const char *hostname, const char *port
         return 1;
     }
     httpsData.currentPlayer = currentPlayer;
+    httpsData.connection_closed = 0;
     int ret;
     mbedtls_ssl_init(&httpsData.ssl);
     mbedtls_ssl_config_init(&httpsData.conf);
@@ -193,6 +195,7 @@ void httpsGetPlayerInfo(player_t *currentPlayer)
     int ret = mbedtls_pk_write_pubkey_der(&encryptionGetData()->key, publickey, sizeof(publickey));
     if (ret < 0)
     {
+        mbedtls_sha1_free(&sha1);
         printl(LOG_ERROR, "mbedtls_pk_write_pubkey_der returned %d\n", ret);
         currentPlayer->remove_player_event = 1;
         return;
@@ -215,6 +218,97 @@ void httpsGetPlayerInfo(player_t *currentPlayer)
     // set the rts flag and dispatch it whenever it can be sent
     currentPlayer->https_rts_event = 1;
 }
+static int header_equals(const char *a, size_t n, const char *b)
+{
+    if (n != strlen(b)) return 0;
+    for (size_t i = 0; i < n; i++)
+    {
+        unsigned char c = (unsigned char)a[i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        if (c != (unsigned char)b[i]) return 0;
+    }
+    return 1;
+}
+
+// 0: incomplete, -1: invalid, 1: complete. Buffer always has a spare terminator.
+static int http_body(size_t *body_offset, size_t *body_length)
+{
+    char *buffer = httpsData.buffer;
+    char *end = strstr(buffer, "\r\n\r\n");
+    if (!end) return 0;
+    char *line = strstr(buffer, "\r\n");
+    if (!line || line - buffer < 12 ||
+        (strncmp(buffer, "HTTP/1.1 200 ", 13) && strncmp(buffer, "HTTP/1.0 200 ", 13))) return -1;
+    size_t length = 0;
+    int has_length = 0, chunked = 0;
+    for (line += 2; line < end; )
+    {
+        char *next = strstr(line, "\r\n");
+        char *colon = memchr(line, ':', (size_t)(next - line));
+        if (!colon) return -1;
+        char *value = colon + 1;
+        while (value < next && (*value == ' ' || *value == '\t')) value++;
+        char *value_end = next;
+        while (value_end > value && (value_end[-1] == ' ' || value_end[-1] == '\t')) value_end--;
+        if (header_equals(line, (size_t)(colon - line), "content-length"))
+        {
+            if (has_length || value == value_end) return -1;
+            has_length = 1;
+            for (; value < value_end; value++)
+            {
+                if (*value < '0' || *value > '9') return -1;
+                length = length * 10 + (size_t)(*value - '0');
+                if (length >= sizeof(httpsData.buffer)) return -1;
+            }
+        }
+        else if (header_equals(line, (size_t)(colon - line), "transfer-encoding"))
+        {
+            if (chunked || !header_equals(value, (size_t)(value_end-value), "chunked")) return -1;
+            chunked = 1;
+        }
+        line = next + 2;
+    }
+    size_t start = (size_t)(end - buffer) + 4;
+    if (has_length)
+    {
+        if (chunked || length >= sizeof(httpsData.buffer) - start) return -1;
+        if (length > httpsData.offset - start) return 0;
+        *body_offset = start; *body_length = length;
+        return 1;
+    }
+    if (!chunked) return -1;
+    // Validate the entire chunked body before compacting it in place.
+    for (int pass = 0; pass < 2; pass++)
+    {
+        size_t cursor = start, out = start;
+        for (;;)
+        {
+            char *size_end = strstr(buffer + cursor, "\r\n");
+            if (!size_end) return 0;
+            size_t size = 0;
+            if (size_end == buffer + cursor) return -1;
+            for (char *digit = buffer + cursor; digit < size_end; digit++)
+            {
+                unsigned char c = (unsigned char)*digit;
+                unsigned value;
+                if (c >= '0' && c <= '9') value = c - '0';
+                else if (c >= 'a' && c <= 'f') value = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F') value = c - 'A' + 10;
+                else return -1;
+                size = size * 16 + value;
+                if (size >= sizeof(httpsData.buffer)) return -1;
+            }
+            cursor = (size_t)(size_end - buffer) + 2;
+            if (size + 2 > httpsData.offset - cursor) return 0;
+            if (buffer[cursor + size] != '\r' || buffer[cursor + size + 1] != '\n') return -1;
+            if (!size) { *body_offset = start; *body_length = out - start; break; }
+            if (pass) memmove(buffer + out, buffer + cursor, size);
+            out += size; cursor += size + 2;
+        }
+    }
+    return 1;
+}
+
 int httpsRtr(player_t *currentPlayer)
 {
     if (currentPlayer == NULL)
@@ -234,94 +328,30 @@ int httpsRtr(player_t *currentPlayer)
         currentPlayer->remove_player_event = 1;
         return 0;
     }
-    int ret = mbedtls_ssl_read(&httpsData.ssl, (unsigned char *)&httpsData.buffer[httpsData.offset], sizeof(((httpsData_t *)0)->buffer) - httpsData.offset);
+    if (httpsData.offset >= sizeof(httpsData.buffer) - 1)
+    { currentPlayer->remove_player_event = 1; return 0; }
+    int ret = mbedtls_ssl_read(&httpsData.ssl, (unsigned char *)httpsData.buffer + httpsData.offset,
+                             sizeof(httpsData.buffer) - 1 - httpsData.offset);
     httpsData.timeout++;
-    if (ret < 0)
-    {
-        switch (ret)
-        {
-        case MBEDTLS_ERR_SSL_WANT_READ:
-            break;
-        case MBEDTLS_ERR_SSL_WANT_WRITE:
-            break;
-        default:
-            printl(LOG_WARN, "mbedtls_ssl_read returned %d\n", ret);
-            currentPlayer->remove_player_event = 1;
-            return 0;
-            break;
-        }
-        return 1;
-    }
-    httpsData.offset += ret;
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) return 1;
+    if (ret <= 0) { currentPlayer->remove_player_event = 1; return 0; }
+    httpsData.offset += (size_t)ret;
+    httpsData.buffer[httpsData.offset] = '\0';
     httpsData.timeout = 0;
-    // check if header is received
-    char *header_end = strstr(httpsData.buffer, "\r\n\r\n");
-    if (header_end == NULL)
-    {
-        return 1;
-    }
-    // check for HTTP 204
-    if (strstr(httpsData.buffer, "204 No Content\r\n"))
-    {
-        printl(LOG_INFO, "HTTP 204 received\n");
-        strncpy((char *)currentPlayer->disconnect_reason, "Invalid session (Try restarting your game)", sizeof(((player_t *)0)->disconnect_reason));
-        currentPlayer->remove_player_event = 1;
-    }
-    size_t header_len = (size_t)(header_end - httpsData.buffer) + 4; // header_len includes the \r\n\r\n
-    size_t body_offset = header_len;
-    size_t content_length;
-    // apparently its okay for the case to be different WHY
-    char *content_length_header = strstr(httpsData.buffer, "Content-Length:");
-    if (content_length_header == NULL)
-    {
-        content_length_header = strstr(httpsData.buffer, "content-length:");
-    }
-    if (content_length_header != NULL && content_length_header < header_end)
-    {
-        content_length = (size_t)atoi(content_length_header + strlen("Content-Length:"));
-    }
-    else
-    {
-        // the auth server no longer sends Content-Length, so consider this case as well
-        char *chunk_size_end = strstr(&httpsData.buffer[body_offset], "\r\n");
-        if (chunk_size_end == NULL)
-        {
-            // chunk-size line hasn't fully arrived yet
-            return 1;
-        }
-        content_length = (size_t)strtoul(&httpsData.buffer[body_offset], NULL, 16);
-        body_offset = (size_t)(chunk_size_end - httpsData.buffer) + 2;
-    }
-    // close the connection as we dont need it anymore but keep the data for processing
+    size_t body_offset, content_length;
+    int complete = http_body(&body_offset, &content_length);
+    if (!complete) return 1;
+    if (complete < 0) { currentPlayer->remove_player_event = 1; return 0; }
     httpsClose();
-    // check the content length
-    if (content_length >= sizeof(((httpsData_t *)0)->buffer))
-    {
-        printl(LOG_WARN, "https_rtr_event content length too big\n");
-        currentPlayer->remove_player_event = 1;
-        return 0;
-    }
-    // check if all the data has been received
-    if ((httpsData.offset - body_offset) < content_length)
-    {
-        return 1;
-    }
     httpsData.len = content_length;
     httpsData.offset = body_offset;
-    // add null terminator
-    if (httpsData.offset + httpsData.len >= sizeof(((httpsData_t *)0)->buffer))
-    {
-        printl(LOG_WARN, "https_rtr_event buffer overflow\n");
-        currentPlayer->remove_player_event = 1;
-        return 0;
-    }
-    httpsData.buffer[httpsData.offset + httpsData.len] = '\0';
+    httpsData.buffer[body_offset + content_length] = '\0';
     lwjson_token_t tokens[10];
     lwjson_t lwjson;
 
     lwjson_init(&lwjson, tokens, LWJSON_ARRAYSIZE(tokens));
     ret = lwjson_parse(&lwjson, &httpsData.buffer[httpsData.offset]);
-    if (ret > 0)
+    if (ret != lwjsonOK)
     {
         printl(LOG_WARN, "lwjson_parse returned %d\n", ret);
         lwjson_free(&lwjson);
@@ -336,14 +366,15 @@ int httpsRtr(player_t *currentPlayer)
         currentPlayer->remove_player_event = 1;
         return 0;
     }
-    if (t->type == LWJSON_TYPE_STRING)
+    if (t->type != LWJSON_TYPE_STRING || !t->u.str.token_value_len ||
+        t->u.str.token_value_len >= sizeof(currentPlayer->name))
     {
-        if (t->u.str.token_value_len < sizeof(((player_t *)0)->name))
-        {
-            memset(currentPlayer->name, 0, sizeof(((player_t *)0)->name));
-            memcpy(currentPlayer->name, t->u.str.token_value, t->u.str.token_value_len);
-        }
+        lwjson_free(&lwjson);
+        currentPlayer->remove_player_event = 1;
+        return 0;
     }
+    memset(currentPlayer->name, 0, sizeof(currentPlayer->name));
+    memcpy(currentPlayer->name, t->u.str.token_value, t->u.str.token_value_len);
     // sanity check for the player name
     if (playerCheckName(currentPlayer))
     {
@@ -360,67 +391,30 @@ int httpsRtr(player_t *currentPlayer)
         currentPlayer->remove_player_event = 1;
         return 0;
     }
-    if ((t = lwjson_find(&lwjson, "properties")) == NULL)
+    if ((t = lwjson_find(&lwjson, "properties")) == NULL || t->type != LWJSON_TYPE_ARRAY)
     {
         lwjson_free(&lwjson);
         currentPlayer->remove_player_event = 1;
         return 0;
     }
-    const lwjson_token_t *tkn = lwjson_get_first_child(t);
-    if (tkn != NULL)
+    for (const lwjson_token_t *obj = lwjson_get_first_child(t); obj; obj = obj->next)
     {
-        if (tkn->type == LWJSON_TYPE_OBJECT)
+        if (obj->type != LWJSON_TYPE_OBJECT) continue;
+        const lwjson_token_t *name = lwjson_find_ex(&lwjson, obj, "name");
+        if (!name || name->type != LWJSON_TYPE_STRING || name->u.str.token_value_len != 8 ||
+            memcmp(name->u.str.token_value, "textures", 8)) continue;
+        const char *keys[] = {"value", "signature"};
+        for (size_t i = 0; i < 2; i++)
         {
-            uint8_t texture_flag = 0;
-            for (const lwjson_token_t *obj = lwjson_get_first_child(tkn); obj != NULL; obj = obj->next)
-            {
-                if (obj->type == LWJSON_TYPE_STRING)
-                {
-                    if (strncmp(obj->token_name, "name", obj->token_name_len) == 0)
-                    {
-                        if (strncmp(obj->u.str.token_value, "textures", obj->u.str.token_value_len) == 0)
-                        {
-                            texture_flag = 1;
-                        }
-                    }
-                    if (texture_flag)
-                    {
-                        if (strncmp(obj->token_name, "value", obj->token_name_len) == 0)
-                        {
-                            if (currentPlayer->texture_value == NULL)
-                            {
-                                currentPlayer->texture_value = U_calloc(1, obj->u.str.token_value_len + 1);
-                                if (currentPlayer->texture_value == NULL)
-                                {
-                                    printl(LOG_ERROR, "U_calloc returned NULL\n");
-                                    lwjson_free(&lwjson);
-                                    currentPlayer->remove_player_event = 1;
-                                    return 0;
-                                }
-                                memcpy(currentPlayer->texture_value, obj->u.str.token_value, obj->u.str.token_value_len);
-                                currentPlayer->texture_value_len = obj->u.str.token_value_len;
-                            }
-                        }
-                        if (strncmp(obj->token_name, "signature", obj->token_name_len) == 0)
-                        {
-                            if (currentPlayer->texture_signature == NULL)
-                            {
-                                currentPlayer->texture_signature = U_calloc(1, obj->u.str.token_value_len + 1);
-                                if (currentPlayer->texture_signature == NULL)
-                                {
-                                    printl(LOG_ERROR, "U_calloc returned NULL\n");
-                                    lwjson_free(&lwjson);
-                                    currentPlayer->remove_player_event = 1;
-                                    return 0;
-                                }
-                                memcpy(currentPlayer->texture_signature, obj->u.str.token_value, obj->u.str.token_value_len);
-                                currentPlayer->texture_signature_len = obj->u.str.token_value_len;
-                                texture_flag = 0;
-                            }
-                        }
-                    }
-                }
-            }
+            const lwjson_token_t *value = lwjson_find_ex(&lwjson, obj, keys[i]);
+            if (!value || value->type != LWJSON_TYPE_STRING) continue;
+            char **dest = i ? &currentPlayer->texture_signature : &currentPlayer->texture_value;
+            size_t *len = i ? &currentPlayer->texture_signature_len : &currentPlayer->texture_value_len;
+            if (*dest) continue;
+            *dest = U_calloc(1, value->u.str.token_value_len + 1);
+            if (!*dest) { lwjson_free(&lwjson); currentPlayer->remove_player_event = 1; return 0; }
+            *len = value->u.str.token_value_len;
+            memcpy(*dest, value->u.str.token_value, *len);
         }
     }
     lwjson_free(&lwjson);
@@ -486,6 +480,7 @@ int httpsRts(player_t *currentPlayer)
         }
         return 1;
     }
+    if (ret == 0) { currentPlayer->remove_player_event = 1; return 0; }
     httpsData.offset += ret;
     httpsData.len -= ret;
     httpsData.timeout = 0;
@@ -511,11 +506,15 @@ void httpsFreePlayer(player_t *currentPlayer)
     httpsClose();
     memset(&httpsData, 0, sizeof(httpsData_t));
     httpsData.currentPlayer = NULL;
+    httpsData.net.fd = -1;
+    httpsData.connection_closed = 1;
 }
 void httpsCleanup()
 {
     httpsClose();
     memset(&httpsData, 0, sizeof(httpsData_t));
     httpsData.currentPlayer = NULL;
+    httpsData.net.fd = -1;
+    httpsData.connection_closed = 1;
 }
 #endif /*ONLINE_MODE_AUTH*/

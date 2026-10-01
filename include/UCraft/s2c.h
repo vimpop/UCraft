@@ -215,7 +215,7 @@ void PlayS2Cdisconnect(player_t *currentPlayer, char *reason);
 void PlayS2Csettime(int64_t time_of_day, uint8_t time_of_day_increasing);
 void PlayS2Ccontainersetcontent(player_t *currentPlayer, storage_t *inventory);
 void PlayS2Ccontainersetslot(player_t *currentPlayer, int32_t window_id, int16_t slot, int16_t count, int32_t item_id);
-void PlayS2Copenscreen(player_t *currentPlayer, int32_t window_id, int32_t window_type, char *window_title);
+void PlayS2Copenscreen(player_t *currentPlayer, int32_t window_id, WindowTypes window_type, char *window_title);
 
 void ConfigurationS2Cfeatures();
 void ConfigurationS2Cknownpacks();

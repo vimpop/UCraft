@@ -60,6 +60,8 @@ struct player_t
   uint8_t onground : 1;
   uint8_t sneaking : 1;
   uint8_t heartbeat : 1;
+  // Status ping payload is echoed verbatim, independently of the login name.
+  char ping_payload[8];
   // Events
   uint8_t chat_event : 1;
   uint8_t ping_event : 1;

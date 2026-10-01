@@ -1,4 +1,6 @@
 #include "c2s.h"
+#include <math.h>
+#include <limits.h>
 #include "storage.h"
 #include "blocks/block_states.h"
 
@@ -18,7 +20,7 @@ static void PlayC2S_chat(player_t *currentPlayer)
     if (!chat_inuse)
     {
         int32_t length = readVarInt();
-        if (length <= 255)
+        if (!readFailed() && length >= 0 && length <= 255)
         {
             memset(chat_buffer, 0, sizeof(chat_buffer));
             // add the decorators, very ugly but trying to avoid using snprintf here
@@ -58,6 +60,7 @@ static void PlayC2S_chat(player_t *currentPlayer)
                 }
             }
             currentPlayer->chat_timestamp = readLong();
+            if (readFailed()) return;
             currentPlayer->chat_event = 1;
             currentPlayer->chat_len = strnlen(chat_buffer, sizeof(chat_buffer)); // do not count the null char
             currentPlayer->chat_ptr = chat_buffer;
@@ -89,66 +92,57 @@ static void PlayC2S_container_click(player_t *currentPlayer)
 {
     int32_t window_id = readVarInt();
     readVarInt(); // State ID
-    readShort();  // Slot
-    readByte();   // Button
+    readShort(); // Slot
+    readByte(); // Button
     readVarInt(); // Mode
-    int16_t changed_slots = readVarInt();
-    if (changed_slots > 0 && changed_slots <= INVENTORY_SIZE)
+    int32_t changed_slots = readVarInt();
+    if (readFailed() || changed_slots < 0 || changed_slots > INVENTORY_SIZE ||
+        (window_id != 0 && window_id != 1) ||
+        (window_id == 1 && !currentPlayer->gamePlayerData.crafting_menu))
+    { readReject(); return; }
+    inventory_slots_t changes[INVENTORY_SIZE];
+    int16_t indices[INVENTORY_SIZE];
+    for (int32_t i = 0; i < changed_slots; i++)
     {
-        for (int i = 0; i < changed_slots; i++)
+        indices[i] = readShort();
+        int present = readByte();
+        if (readFailed() || indices[i] < 0 || indices[i] >= INVENTORY_SIZE || present > 1)
+        { readReject(); return; }
+        changes[i] = (inventory_slots_t){0};
+        if (present)
         {
-            int16_t slot_num = readShort();
-            if (slot_num < INVENTORY_SIZE)
-            {
-                if (window_id == 0) // player inventory
-                {
-                    if (readByte()) // Has Item
-                    {
-                        int32_t item_id = readVarInt();
-                        int32_t item_count = readVarInt();
-                        readByte(); // Components to add
-                        readByte(); // Components to remove
-                        storageInventoryUpdateSlot(currentPlayer, slot_num, item_count, item_id);
-                    }
-                    else
-                    {
-                        storageInventoryUpdateSlot(currentPlayer, slot_num, 0, 0);
-                    }
-                }
-                else if ((window_id == 1) && currentPlayer->gamePlayerData.crafting_menu) // crafting menu
-                {
-                    if (readByte()) // Has Item
-                    {
-                        int32_t item_id = readVarInt();
-                        int32_t item_count = readVarInt();
-                        readByte(); // Components to add
-                        readByte(); // Components to remove
-                        currentPlayer->gamePlayerData.crafting_menu[slot_num].count = item_count;
-                        currentPlayer->gamePlayerData.crafting_menu[slot_num].item_id = item_id;
-                    }
-                    else
-                    {
-                        currentPlayer->gamePlayerData.crafting_menu[slot_num].count = 0;
-                        currentPlayer->gamePlayerData.crafting_menu[slot_num].item_id = 0;
-                    }
-                    if (slot_num > 0 && slot_num <= 9)
-                    {
-                        currentPlayer->gamePlayerData.crafting_table_event = 1;
-                    }
-                }
-            }
+            int32_t item = readVarInt(), count = readVarInt();
+            int32_t added = readVarInt(), removed = readVarInt();
+            if (readFailed() || item <= 0 || count <= 0 || count > 64 || added || removed)
+            { readReject(); return; } // Item components are not implemented.
+            changes[i] = (inventory_slots_t){(int16_t)count, item};
         }
     }
+    for (int32_t i = 0; i < changed_slots; i++)
+    {
+        int16_t slot = indices[i];
+        if (window_id == 0)
+            storageInventoryUpdateSlot(currentPlayer, slot, changes[i].count, changes[i].item_id);
+        else
+        {
+            currentPlayer->gamePlayerData.crafting_menu[slot] = changes[i];
+            if (slot >= 1 && slot <= 9) currentPlayer->gamePlayerData.crafting_table_event = 1;
+        }
+    }
+
 }
 static void PlayC2S_container_close(player_t *currentPlayer)
 {
     int32_t window_id = readVarInt(); // Window ID
+    if (readFailed()) return;
     if (window_id == 1)
     {
         if (currentPlayer->gamePlayerData.crafting_menu)
         {
             storage_t *inventory = storageInventoryGet(currentPlayer);
             // restore the inventory
+            if (!inventory) { currentPlayer->remove_player_event = 1; return; }
+            inventory_slots_t offhand = inventory->inventory_slots[45];
             inventory_slots_t armor[4];
             // copy the armor
             for (int i = 0; i < 4; i++)
@@ -176,6 +170,7 @@ static void PlayC2S_container_close(player_t *currentPlayer)
                 inventory->inventory_slots[i + 5].count = armor[i].count;
                 inventory->inventory_slots[i + 5].item_id = armor[i].item_id;
             }
+            inventory->inventory_slots[45] = offhand;
             U_free(currentPlayer->gamePlayerData.crafting_menu);
             currentPlayer->gamePlayerData.crafting_menu = NULL;
         }
@@ -195,31 +190,24 @@ static void PlayC2S_keep_alive(player_t *currentPlayer)
     currentPlayer->heartbeat = 1;
 }
 static void PlayC2S_lock_difficulty(player_t *currentPlayer) {}
-static void PlayC2S_move_player_pos(player_t *currentPlayer)
+static void move_player(player_t *p, int position, int rotation)
 {
-    currentPlayer->x = readDouble();
-    currentPlayer->y = readDouble();
-    currentPlayer->z = readDouble();
-    currentPlayer->onground = readByte();
-    currentPlayer->position_event = 1;
+    double x=p->x, y=p->y, z=p->z;
+    float yaw=p->yaw, pitch=p->pitch;
+    if (position) { x=readDouble(); y=readDouble(); z=readDouble(); }
+    if (rotation) { yaw=readFloat(); pitch=readFloat(); }
+    uint8_t flags=readByte();
+    if (readFailed() || !isfinite(x) || !isfinite(y) || !isfinite(z) ||
+        !isfinite(yaw) || !isfinite(pitch) || fabs(x)>30000000 || fabs(z)>30000000 || fabs(y)>30000000)
+    { readReject(); return; }
+    p->x=x; p->y=y; p->z=z;
+    p->yaw=remainderf(yaw,360.0f); p->pitch=remainderf(pitch,360.0f);
+    p->onground=flags & 1;
+    p->position_event=1;
 }
-static void PlayC2S_move_player_pos_rot(player_t *currentPlayer)
-{
-    currentPlayer->x = readDouble();
-    currentPlayer->y = readDouble();
-    currentPlayer->z = readDouble();
-    currentPlayer->yaw = readFloat();
-    currentPlayer->pitch = readFloat();
-    currentPlayer->onground = readByte();
-    currentPlayer->position_event = 1;
-}
-static void PlayC2S_move_player_rot(player_t *currentPlayer)
-{
-    currentPlayer->yaw = readFloat();
-    currentPlayer->pitch = readFloat();
-    currentPlayer->onground = readByte();
-    currentPlayer->position_event = 1;
-}
+static void PlayC2S_move_player_pos(player_t *p) { move_player(p,1,0); }
+static void PlayC2S_move_player_pos_rot(player_t *p) { move_player(p,1,1); }
+static void PlayC2S_move_player_rot(player_t *p) { move_player(p,0,1); }
 static void PlayC2S_move_player_status_only(player_t *currentPlayer) {}
 static void PlayC2S_move_vehicle(player_t *currentPlayer) {}
 static void PlayC2S_paddle_boat(player_t *currentPlayer) {}
@@ -236,6 +224,7 @@ static void PlayC2S_player_action(player_t *currentPlayer)
         readPosition(&currentPlayer->gamePlayerData.block_x, &currentPlayer->gamePlayerData.block_y, &currentPlayer->gamePlayerData.block_z); // Location
         currentPlayer->gamePlayerData.block_face = readByte();                                                                                // Face
         currentPlayer->gamePlayerData.block_sequence = readVarInt();                                                                          // Sequence
+        if (readFailed() || currentPlayer->gamePlayerData.block_face > 5) { readReject(); return; }
         currentPlayer->gamePlayerData.action_item_event = 1;
     }
 }
@@ -257,10 +246,11 @@ static void PlayC2S_set_beacon(player_t *currentPlayer) {}
 static void PlayC2S_set_carried_item(player_t *currentPlayer)
 {
     int16_t slot = readShort();
-    if (slot >= 0 && slot <= 9)
+    if (!readFailed() && slot >= 0 && slot < 9)
     {
         currentPlayer->gamePlayerData.inventory_slot = slot;
     }
+    else readReject();
 }
 static void PlayC2S_set_command_block(player_t *currentPlayer) {}
 static void PlayC2S_set_command_minecart(player_t *currentPlayer) {}
@@ -282,7 +272,9 @@ static void PlayC2S_use_item_on(player_t *currentPlayer)
 {
     readVarInt();                                                                                                                         // Hand
     readPosition(&currentPlayer->gamePlayerData.block_x, &currentPlayer->gamePlayerData.block_y, &currentPlayer->gamePlayerData.block_z); // Location
-    currentPlayer->gamePlayerData.block_face = readVarInt();                                                                              // Face
+    int32_t face = readVarInt();
+    if (readFailed() || face < 0 || face > 5) { readReject(); return; }
+    currentPlayer->gamePlayerData.block_face = (uint8_t)face;                                                                              // Face
 
     readFloat();                                                 // Cursor Position X
     readFloat();                                                 // Cursor Position Y
@@ -290,6 +282,7 @@ static void PlayC2S_use_item_on(player_t *currentPlayer)
     readByte();                                                  // Inside block
     readByte();                                                  // World Border Hit
     currentPlayer->gamePlayerData.block_sequence = readVarInt(); // Sequence
+    if (readFailed()) return;
     currentPlayer->gamePlayerData.action_item_event = 2;
 }
 static void PlayC2S_use_item(player_t *currentPlayer) {}

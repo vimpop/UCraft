@@ -9,7 +9,7 @@
 #include "UCraft.h"
 static uint8_t cleanup_flag;
 
-void cleanup()
+void cleanup(int signal_number)
 {
   // clean up flag
   cleanup_flag = 1;
@@ -17,6 +17,5 @@ void cleanup()
 int main(int argc, char const *argv[])
 {
   signal(SIGINT, cleanup);
-  UCraftStart(&cleanup_flag);
-  return 0;
+  return UCraftStart(&cleanup_flag);
 }

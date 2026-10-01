@@ -11,35 +11,43 @@
 static readPacketVars_t readPacketVars = {.pktbytes = -1};
 
 readPacketVars_t *readValues() { return (readPacketVars_t *)&readPacketVars; }
-uint8_t readAllowed() { return (readPacketVars.bufferpos < readPacketVars.pktsize); }
+uint8_t readAllowed() { return !readPacketVars.failed && readPacketVars.bufferpos < readPacketVars.pktsize; }
+uint8_t readFailed() { return readPacketVars.failed; }
+void readReject()
+{
+  readPacketVars.failed = 1;
+  readPacketVars.pktbytes = 0;
+  if (readPacketVars.player) readPacketVars.player->remove_player_event = 1;
+}
 void readStart(player_t *player) { readPacketVars.player = player; }
 uint8_t readPeekByte()
 {
-  if (readPacketVars.bufferpos > sizeof(readPacketVars.buffer))
+  if (readPacketVars.failed || readPacketVars.bufferpos >= readPacketVars.pktsize ||
+      readPacketVars.bufferpos >= sizeof(readPacketVars.buffer))
   {
-    printl(LOG_ERROR, "read buffer overflow!\n");
-    readPacketVars.player->remove_player_event = 1;
+    readReject();
     return 0;
   }
   return readPacketVars.buffer[readPacketVars.bufferpos++];
 }
 uint8_t readByte()
 {
-  if (readPacketVars.pktbytes)
-  {
-    readPacketVars.pktbytes--;
-    return readPeekByte();
-  }
-  printl(LOG_ERROR, "readByte called without packet or reading too much\n");
-  return 0;
+  if (!readPacketVars.pktbytes) { readReject(); return 0; }
+  readPacketVars.pktbytes--;
+  return readPeekByte();
 }
 void readBuffer(char *buffer, size_t size)
 {
-  uint32_t i;
-  for (i = 0; i < size; i++)
+  if (!buffer || readPacketVars.failed || readPacketVars.bufferpos > readPacketVars.pktsize ||
+      readPacketVars.pktsize > sizeof(readPacketVars.buffer) ||
+      size > readPacketVars.pktsize - readPacketVars.bufferpos || size > readPacketVars.pktbytes)
   {
-    buffer[i] = readByte();
+    readReject();
+    return;
   }
+  memcpy(buffer, readPacketVars.buffer + readPacketVars.bufferpos, size);
+  readPacketVars.bufferpos += size;
+  readPacketVars.pktbytes -= size;
 }
 int16_t readShort()
 {
@@ -50,7 +58,7 @@ int16_t readShort()
 }
 double readDouble()
 {
-  uint64_t c;
+  uint64_t c = 0;
   double v;
   readBuffer((char *)&c, sizeof(uint64_t));
 #if (ENDIAN)
@@ -61,7 +69,7 @@ double readDouble()
 }
 float readFloat()
 {
-  uint32_t c;
+  uint32_t c = 0;
   float v;
   readBuffer((char *)&c, sizeof(uint32_t));
 #if (ENDIAN)
@@ -72,7 +80,7 @@ float readFloat()
 }
 int64_t readLong()
 {
-  int64_t c;
+  int64_t c = 0;
   readBuffer((char *)&c, sizeof(int64_t));
 #if (ENDIAN)
   c = __builtin_bswap64(c);
@@ -82,33 +90,20 @@ int64_t readLong()
 int32_t readVarInt()
 {
   uint32_t value = 0;
-  uint32_t position = 0;
-  uint8_t currentByte;
-
-  for (int i = 0; i < VARINT_MAX; i++)
+  for (unsigned i = 0; i < VARINT_MAX; i++)
   {
-    currentByte = readByte();
-    value |= (currentByte & 0x7F) << position;
-
-    if ((currentByte & 0x80) == 0)
-    {
-      break;
-    }
-    position += 7;
-
-    if (position >= 32)
-    {
-      printl(LOG_ERROR, "VarInt is too big");
-      readPacketVars.player->remove_player_event = 1;
-      return 0;
-    }
+    uint8_t byte = readByte();
+    if (readFailed()) return 0;
+    if (i == 4 && (byte & 0xf0)) { readReject(); return 0; }
+    value |= (uint32_t)(byte & 0x7f) << (7 * i);
+    if (!(byte & 0x80)) return (int32_t)value;
   }
-
-  return value;
+  readReject();
+  return 0;
 }
 void readPosition(int32_t *x, int32_t *y, int32_t *z)
 {
-  uint64_t pos;
+  uint64_t pos = 0;
   readBuffer((char *)&pos, sizeof(uint64_t));
 #if (ENDIAN)
   pos = __builtin_bswap64(pos);
@@ -133,24 +128,24 @@ void readPosition(int32_t *x, int32_t *y, int32_t *z)
 
 void readString(char *data, size_t maxlen)
 {
-  int32_t toread = readVarInt();
-  uint32_t len = 0;
-  while (toread--)
+  int32_t length = readVarInt();
+  if (!data || maxlen == 0 || readFailed() || length < 0 || (size_t)length >= maxlen)
   {
-    if (len < maxlen)
-    {
-      data[len++] = readByte();
-    }
-    else
-    {
-      readByte();
-    }
+    if (data && maxlen) data[0] = 0;
+    readReject();
+    return;
   }
-  data[len] = '\0';
+  readBuffer(data, (size_t)length);
+  if (!readFailed()) data[length] = 0;
 }
 
 // Writing utils
 static sendPacketVars_t sendPacketVars;
+static void sendFail(void)
+{
+  sendPacketVars.failed = 1;
+  if (sendPacketVars.player) sendPacketVars.player->remove_player_event = 1;
+}
 
 void sendSwitchToGlobalBuffer()
 {
@@ -160,6 +155,7 @@ void sendSwitchToGlobalBuffer()
     if ((sendPacketVars.globalbuffer = U_malloc(sendPacketVars.globalbuffersize)) == NULL)
     {
       printl(LOG_ERROR, "malloc failed globalbuffer\n");
+      sendFail();
       return;
     }
   }
@@ -187,41 +183,45 @@ size_t sendRevertFromLocalBuffer()
 }
 static void send_main_byte(uint8_t byte)
 {
+  if (sendPacketVars.failed) return;
   if (sendPacketVars.bufferindex >= sendPacketVars.buffersize)
   {
     uint8_t *buffer = NULL;
     // allocate the required memory
-    sendPacketVars.buffersize += MEM_CHUNK_SIZE;
-    buffer = U_realloc(sendPacketVars.buffer, sendPacketVars.buffersize);
+    size_t new_size = sendPacketVars.buffersize + MEM_CHUNK_SIZE;
+    buffer = U_realloc(sendPacketVars.buffer, new_size);
     if (buffer == NULL)
     {
       printl(LOG_ERROR, "memory allocation failed buffer!\n");
-      sendPacketVars.player->remove_player_event = 1;
+      sendFail();
       return;
     }
     // printl(LOG_INFO,"Buffer size: %ld\n", sendPacketVars.buffersize);
     sendPacketVars.buffer = buffer;
+    sendPacketVars.buffersize = new_size;
   }
   sendPacketVars.buffer[sendPacketVars.bufferindex++] = byte;
 }
 static void send_raw_byte(uint8_t b)
 {
+  if (sendPacketVars.failed) return;
   if (sendPacketVars.global_buffer_active)
   {
     if (sendPacketVars.globalbufferindex >= sendPacketVars.globalbuffersize)
     {
       uint8_t *buffer = NULL;
       // allocate the required memory
-      sendPacketVars.globalbuffersize += MEM_CHUNK_SIZE;
-      buffer = U_realloc(sendPacketVars.globalbuffer, sendPacketVars.globalbuffersize);
+      size_t new_size = sendPacketVars.globalbuffersize + MEM_CHUNK_SIZE;
+      buffer = U_realloc(sendPacketVars.globalbuffer, new_size);
       if (buffer == NULL)
       {
         printl(LOG_ERROR, "Memory allocation failed globalbuffersize!\n");
-        sendPacketVars.player->remove_player_event = 1;
+        sendFail();
         return;
       }
       // printl(LOG_INFO,"Buffer size: %ld %ld\n", sendPacketVars.globalbuffersize,sendPacketVars.globalbufferindex);
       sendPacketVars.globalbuffer = buffer;
+      sendPacketVars.globalbuffersize = new_size;
     }
     sendPacketVars.globalbuffer[sendPacketVars.globalbufferindex++] = b;
   }
@@ -250,7 +250,7 @@ void sendclearGlobalBuffer()
       if (buffer == NULL)
       {
         printl(LOG_ERROR, "Memory de/allocation failed!\n");
-        sendPacketVars.player->remove_player_event = 1;
+        sendFail();
         return;
       }
       sendPacketVars.globalbuffer = buffer;
@@ -291,6 +291,7 @@ size_t sendData(uint8_t *data, size_t buffersize, int *blocked)
 
     if (r < 0)
     {
+      if (errno == EINTR) continue;
       if (errno == EAGAIN || errno == EWOULDBLOCK)
       {
         if (blocked != NULL)
@@ -301,13 +302,13 @@ size_t sendData(uint8_t *data, size_t buffersize, int *blocked)
       }
       printl(LOG_ERROR, "could not send (%d) code %ld (%p %ld)\n", sock, r, data, totalSent);
       printl(LOG_ERROR, "errno: %s\n", strerror(errno));
-      sendPacketVars.player->remove_player_event = 1;
+      sendFail();
       return totalSent;
     }
     if (r == 0)
     {
       printl(LOG_ERROR, "could not send (%d) code %ld (%p %ld)\n", sock, r, data, totalSent);
-      sendPacketVars.player->remove_player_event = 1;
+      sendFail();
       return totalSent;
     }
     totalSent += r;
@@ -317,12 +318,14 @@ size_t sendData(uint8_t *data, size_t buffersize, int *blocked)
 void sendStartPlayer(player_t *player)
 {
   sendPacketVars.player = player;
+  sendPacketVars.failed = 0;
   if (sendPacketVars.buffer == NULL)
   {
     sendPacketVars.buffersize = MEM_CHUNK_SIZE;
     if ((sendPacketVars.buffer = U_malloc(sendPacketVars.buffersize)) == NULL)
     {
       printl(LOG_ERROR, "malloc failed buffer\n");
+      sendFail();
       return;
     }
   }
@@ -338,7 +341,7 @@ void sendStartPlayer(player_t *player)
     if (buffer == NULL)
     {
       printl(LOG_ERROR, "Memory de/allocation failed buffer!\n");
-      sendPacketVars.player->remove_player_event = 1;
+      sendFail();
       return;
     }
     sendPacketVars.buffer = buffer;
@@ -360,7 +363,7 @@ static void sendQueueData(const uint8_t *data, size_t len)
   if (pkt == NULL)
   {
     printl(LOG_ERROR, "Memory allocation failed packet queue!\n");
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   pkt->data = U_malloc(len);
@@ -368,7 +371,7 @@ static void sendQueueData(const uint8_t *data, size_t len)
   {
     printl(LOG_ERROR, "Memory allocation failed packet data!\n");
     U_free(pkt);
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   memcpy(pkt->data, data, len);
@@ -387,6 +390,7 @@ static void sendQueueData(const uint8_t *data, size_t len)
 }
 void sendDispatch()
 {
+  if (sendPacketVars.failed) return;
   // send the data
   if (sendPacketVars.bufferindex != 0)
   {
@@ -445,6 +449,7 @@ void sendFlush(player_t *player)
     ssize_t r = U_send(player->fd, (char *)pkt->data + pkt->sent, blockSize, MSG_NOSIGNAL);
     if (r < 0)
     {
+      if (errno == EINTR) continue;
       if (errno == EAGAIN || errno == EWOULDBLOCK)
       {
         return;
@@ -482,6 +487,7 @@ void sendStart()
     if ((sendPacketVars.packetbuffer = U_malloc(sendPacketVars.packetsize)) == NULL)
     {
       printl(LOG_ERROR, "U_malloc failed packetbuffer\n");
+      sendFail();
       return;
     }
   }
@@ -492,19 +498,20 @@ void sendStart()
 }
 void sendByte(uint8_t b)
 {
+  if (sendPacketVars.failed) return;
 
   if (sendPacketVars.localbuffer_active)
   {
     if (sendPacketVars.localbufferindex >= sendPacketVars.localbuffersize)
     {
       printl(LOG_ERROR, "local buffer no more space! %ld/%ld\n", sendPacketVars.localbufferindex, sendPacketVars.localbuffersize);
-      sendPacketVars.player->remove_player_event = 1;
+      sendFail();
       return;
     }
     if (sendPacketVars.localbuffer == NULL)
     {
       printl(LOG_ERROR, "local buffer NULL\n");
-      sendPacketVars.player->remove_player_event = 1;
+      sendFail();
       return;
     }
     sendPacketVars.localbuffer[sendPacketVars.localbufferindex++] = b;
@@ -515,16 +522,17 @@ void sendByte(uint8_t b)
     {
       uint8_t *buffer = NULL;
       // allocate the required memory
-      sendPacketVars.packetsize += MEM_CHUNK_SIZE;
-      buffer = U_realloc(sendPacketVars.packetbuffer, sendPacketVars.packetsize);
+      size_t new_size = sendPacketVars.packetsize + MEM_CHUNK_SIZE;
+      buffer = U_realloc(sendPacketVars.packetbuffer, new_size);
       if (buffer == NULL)
       {
         printl(LOG_ERROR, "Memory allocation failed!\n");
-        sendPacketVars.player->remove_player_event = 1;
+        sendFail();
         return;
       }
       // printl(LOG_INFO,"Buffer size: %ld\n", sendPacketVars.packetsize);
       sendPacketVars.packetbuffer = buffer;
+      sendPacketVars.packetsize = new_size;
     }
     sendPacketVars.packetbuffer[sendPacketVars.packetindex++] = b;
   }
@@ -535,13 +543,13 @@ void sendPrefixedStart()
   if (sendPacketVars.localbuffer_active)
   {
     printl(LOG_ERROR, "prefixed segment not supported in local buffer\n");
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   if (sendPacketVars.packet_prefixed_active)
   {
     printl(LOG_ERROR, "prefixed segment already active\n");
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   sendPacketVars.packet_prefixed_start = sendPacketVars.packetindex;
@@ -552,13 +560,13 @@ void sendPrefixedEnd()
   if (sendPacketVars.localbuffer_active)
   {
     printl(LOG_ERROR, "prefixed segment not supported in local buffer\n");
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   if (!sendPacketVars.packet_prefixed_active)
   {
     printl(LOG_ERROR, "prefixed segment start not set\n");
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   sendPacketVars.packet_prefixed_end = sendPacketVars.packetindex;
@@ -572,7 +580,7 @@ void sendPlayPacketHeader(size_t id)
     return;
   }
   printl(LOG_ERROR, "Incorrect PLAY packet id ID:%ld player: %d\n", id, sendPacketVars.player->id);
-  sendPacketVars.player->remove_player_event = 1;
+  sendFail();
 }
 void sendConfigurationPacketHeader(size_t id)
 {
@@ -582,7 +590,7 @@ void sendConfigurationPacketHeader(size_t id)
     return;
   }
   printl(LOG_ERROR, "Incorrect CONFIG packet id ID:%ld player: %d\n", id, sendPacketVars.player->id);
-  sendPacketVars.player->remove_player_event = 1;
+  sendFail();
 }
 void sendBuffer(const char *buf, size_t len)
 {
@@ -613,7 +621,7 @@ void sendShort(int16_t v)
 }
 void sendLong(int64_t v)
 {
-  int64_t c;
+  int64_t c = 0;
 #if (ENDIAN)
   c = __builtin_bswap64(v);
 #else
@@ -623,7 +631,7 @@ void sendLong(int64_t v)
 }
 void sendDouble(double v)
 {
-  uint64_t c;
+  uint64_t c = 0;
   memcpy(&c, &v, sizeof(uint64_t));
 #if (ENDIAN)
   c = __builtin_bswap64(c);
@@ -632,7 +640,7 @@ void sendDouble(double v)
 }
 void sendFloat(float v)
 {
-  uint32_t c;
+  uint32_t c = 0;
   memcpy(&c, &v, sizeof(uint32_t));
 #if (ENDIAN)
   c = __builtin_bswap32(c);
@@ -686,7 +694,7 @@ static void send_uncompressed()
     if (sendPacketVars.packet_prefixed_end < sendPacketVars.packet_prefixed_start || sendPacketVars.packet_prefixed_end > sendPacketVars.packetindex)
     {
       printl(LOG_ERROR, "prefixed segment range invalid\n");
-      sendPacketVars.player->remove_player_event = 1;
+      sendFail();
       sendPacketVars.packet_prefixed_active = 0;
       return;
     }
@@ -770,6 +778,7 @@ static int push_raw_compressed(z_streamp strm, unsigned char *data, size_t size,
     if (sizeof(buffer) - strm->avail_out > 0)
     {
       send_raw_data((char *)buffer, sizeof(buffer) - strm->avail_out);
+      if (sendPacketVars.failed) return Z_MEM_ERROR;
     }
 
     if (rc == Z_STREAM_END)
@@ -817,13 +826,14 @@ static void send_compressed()
   size_t segment_len = 0;
   size_t data_len_varint_len;
   size_t len;
+  size_t raw_start = sendPacketVars.global_buffer_active ? sendPacketVars.globalbufferindex : sendPacketVars.bufferindex;
 
   if (sendPacketVars.packet_prefixed_active)
   {
     if (sendPacketVars.packet_prefixed_end < sendPacketVars.packet_prefixed_start || sendPacketVars.packet_prefixed_end > sendPacketVars.packetindex)
     {
       printl(LOG_ERROR, "prefixed segment range invalid\n");
-      sendPacketVars.player->remove_player_event = 1;
+      sendFail();
       sendPacketVars.packet_prefixed_active = 0;
       return;
     }
@@ -841,7 +851,7 @@ static void send_compressed()
   if (rc != Z_OK)
   {
     printl(LOG_ERROR, "failed to init deflate rc: %d\n", rc);
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     sendPacketVars.packet_prefixed_active = 0;
     return;
   }
@@ -851,21 +861,27 @@ static void send_compressed()
   if (sendPacketVars.packet_prefixed_active)
   {
     // send the data prior to the marker
-    push_raw_compressed(&strm, sendPacketVars.packetbuffer, sendPacketVars.packet_prefixed_start, Z_SYNC_FLUSH);
+    rc = push_raw_compressed(&strm, sendPacketVars.packetbuffer, sendPacketVars.packet_prefixed_start, Z_SYNC_FLUSH);
+    if (rc != Z_OK) goto compression_error;
     // send the buffer length prefix
     len = varint_buffer(value, (int32_t)segment_len);
-    push_raw_compressed(&strm, value, len, Z_SYNC_FLUSH);
+    rc = push_raw_compressed(&strm, value, len, Z_SYNC_FLUSH);
+    if (rc != Z_OK) goto compression_error;
     // send the marked buffer
-    push_raw_compressed(&strm, (unsigned char *)&sendPacketVars.packetbuffer[sendPacketVars.packet_prefixed_start], segment_len, Z_SYNC_FLUSH);
+    rc = push_raw_compressed(&strm, (unsigned char *)&sendPacketVars.packetbuffer[sendPacketVars.packet_prefixed_start], segment_len, Z_SYNC_FLUSH);
+    if (rc != Z_OK) goto compression_error;
     // send the remaining packet
-    push_raw_compressed(&strm, (unsigned char *)&sendPacketVars.packetbuffer[sendPacketVars.packet_prefixed_end], sendPacketVars.packetindex - sendPacketVars.packet_prefixed_end, Z_SYNC_FLUSH);
+    rc = push_raw_compressed(&strm, (unsigned char *)&sendPacketVars.packetbuffer[sendPacketVars.packet_prefixed_end], sendPacketVars.packetindex - sendPacketVars.packet_prefixed_end, Z_SYNC_FLUSH);
+    if (rc != Z_OK) goto compression_error;
     sendPacketVars.packet_prefixed_active = 0;
   }
   else
   {
-    push_raw_compressed(&strm, sendPacketVars.packetbuffer, data_len, Z_SYNC_FLUSH);
+    rc = push_raw_compressed(&strm, sendPacketVars.packetbuffer, data_len, Z_SYNC_FLUSH);
+    if (rc != Z_OK) goto compression_error;
   }
-  push_raw_compressed(&strm, Z_NULL, 0, Z_FINISH);
+  rc = push_raw_compressed(&strm, Z_NULL, 0, Z_FINISH);
+  if (rc != Z_OK) goto compression_error;
   deflateEnd(&strm);
   // i am not a fan of this but this is the only way i know to populate the actual size
   if (sendPacketVars.global_buffer_active)
@@ -882,10 +898,19 @@ static void send_compressed()
     memmove(pkt + len, pkt + VARINT_MAX, strm.total_out + data_len_varint_len);
     sendPacketVars.bufferindex -= (VARINT_MAX - len);
   }
+  return;
+compression_error:
+  deflateEnd(&strm);
+  if (sendPacketVars.global_buffer_active) sendPacketVars.globalbufferindex = raw_start;
+  else sendPacketVars.bufferindex = raw_start;
+  sendPacketVars.packet_prefixed_active = 0;
+  sendFail();
+
 }
 #endif
 void sendDone()
 {
+  if (sendPacketVars.failed) return;
 #ifdef COMPRESSION
   if ((sendPacketVars.packetindex >= COMPRESSION_THRESHOLD) && sendPacketVars.player->compression_flag)
   {
@@ -898,6 +923,7 @@ void sendDone()
 #else
   send_uncompressed();
 #endif
+  if (sendPacketVars.failed) return;
   // free uneeded space if its more than MEM_CHUNK_THRESHOLD chunk sizes
   if ((ssize_t)((sendPacketVars.packetsize - sendPacketVars.packetindex) / MEM_CHUNK_SIZE) >= MEM_CHUNK_THRESHOLD)
   {
@@ -908,7 +934,7 @@ void sendDone()
     if (buffer == NULL)
     {
       printl(LOG_ERROR, "Memory de/allocation failed packet!\n");
-      sendPacketVars.player->remove_player_event = 1;
+      sendFail();
       return;
     }
     sendPacketVars.packetbuffer = buffer;
@@ -944,7 +970,7 @@ void sendString(const char *str, size_t len)
   if (str == NULL)
   {
     printl(LOG_ERROR, "Send string failed! string is null!\n");
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   if (len == (size_t)(-1))
@@ -954,7 +980,7 @@ void sendString(const char *str, size_t len)
   if (len > MAX_STRING_SIZE)
   {
     printl(LOG_ERROR, "Send string failed! len(%ld) > %ld\n", len, (size_t)MAX_STRING_SIZE);
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   sendVarInt(len);
@@ -970,7 +996,7 @@ void sendFormattedString(const char *str, size_t len)
   if (str == NULL)
   {
     printl(LOG_ERROR, "Send formatted string failed! string is null!\n");
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   if (len == (size_t)(-1))
@@ -980,7 +1006,7 @@ void sendFormattedString(const char *str, size_t len)
   if (len > MAX_STRING_SIZE)
   {
     printl(LOG_ERROR, "Send formatted string failed! len(%ld) > %ld\n", len, (size_t)MAX_STRING_SIZE);
-    sendPacketVars.player->remove_player_event = 1;
+    sendFail();
     return;
   }
   sendBuffer((char *)NBT_text, sizeof(NBT_text));
@@ -1027,21 +1053,11 @@ void sendUUIDString(uint16_t seed)
 
 void socketioCleanup()
 {
-  if (sendPacketVars.buffer)
-  {
-    U_free(sendPacketVars.buffer);
-    sendPacketVars.buffer = NULL;
-  }
-  if (sendPacketVars.packetbuffer)
-  {
-    U_free(sendPacketVars.packetbuffer);
-    sendPacketVars.packetbuffer = NULL;
-  }
-  if (sendPacketVars.globalbuffer)
-  {
-    U_free(sendPacketVars.globalbuffer);
-    sendPacketVars.globalbuffer = NULL;
-  }
+  U_free(sendPacketVars.buffer);
+  U_free(sendPacketVars.packetbuffer);
+  U_free(sendPacketVars.globalbuffer);
+  memset(&sendPacketVars, 0, sizeof(sendPacketVars));
+  memset(&readPacketVars, 0, sizeof(readPacketVars));
 }
 
 void socketioLog()

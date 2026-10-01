@@ -111,25 +111,13 @@ player_t *playerAdd(uint32_t player_fd)
 }
 int playerCheckName(player_t *player)
 {
-  for (size_t i = 0; i < strnlen(player->name, sizeof(((player_t *)0)->name)); i++)
+  size_t len = strnlen(player->name, sizeof(player->name));
+  if (len == 0 || len > 16) return 1;
+  for (size_t i = 0; i < len; i++)
   {
-    if (player->name[i] <= '/')
-    {
-      return 1;
-    }
-    if (player->name[i] >= ':' && player->name[i] <= '@')
-    {
-      return 1;
-    }
-    // remove '_' since its valid
-    if ((player->name[i] >= '[' && player->name[i] <= '`') && player->name[i] != '_')
-    {
-      return 1;
-    }
-    if (player->name[i] >= '{')
-    {
-      return 1;
-    }
+    unsigned char c = (unsigned char)player->name[i];
+    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+          (c >= '0' && c <= '9') || c == '_')) return 1;
   }
   return 0;
 }
@@ -184,10 +172,11 @@ uint8_t playerRemove(player_t *player)
   }
   player->out_tail = NULL;
   FD_CLR(player->fd, &masterset);
+  gamePlayerLeft(player);
   if (player->active)
   {
     playerPushDisconnected(player->id, player->name, sizeof(((player_t *)0)->name));
-    gamePlayerLeft(player);
+
     printl(LOG_INFO, "player %s has been removed from the game\n", player->name);
   }
   if (playerListHead == player)

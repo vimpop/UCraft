@@ -15,6 +15,7 @@ struct readPacketVars_t
   // current packet context
   size_t pktsize;
   size_t pktbytes;
+  uint8_t failed;
   // player object
   player_t *player;
 };
@@ -41,6 +42,7 @@ struct sendPacketVars_t
   char *localbuffer;
   size_t localbuffersize;
   size_t localbufferindex;
+  uint8_t failed;
   // Flags
   uint8_t packet_prefixed_active : 1;
   uint8_t global_buffer_active : 1;
@@ -51,6 +53,8 @@ struct sendPacketVars_t
 typedef struct sendPacketVars_t sendPacketVars_t;
 readPacketVars_t *readValues();
 uint8_t readAllowed();
+uint8_t readFailed();
+void readReject();
 void readStart(player_t *player);
 uint8_t readPeekByte();
 uint8_t readByte();

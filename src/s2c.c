@@ -44,7 +44,7 @@ void StatusS2Cpong(player_t *currentPlayer)
 
   sendStart();
   sendByte(0x01);
-  sendBuffer(currentPlayer->name, 8);
+  sendBuffer(currentPlayer->ping_payload, sizeof(currentPlayer->ping_payload));
   sendDone();
 }
 // Login packets
@@ -530,7 +530,7 @@ void PlayS2Ccontainersetslot(player_t *currentPlayer, int32_t window_id, int16_t
   sendDone();
 }
 
-void PlayS2Copenscreen(player_t *currentPlayer, int32_t window_id, int32_t window_type, char *window_title)
+void PlayS2Copenscreen(player_t *currentPlayer, int32_t window_id, WindowTypes window_type, char *window_title)
 {
 
   sendStart();

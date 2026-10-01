@@ -8,4 +8,7 @@
 #else
 #include "wrapper_unix.h"
 #endif
+#ifdef UCRAFT_TEST_HOOKS
+#include "test_hooks.h"
+#endif
 #endif

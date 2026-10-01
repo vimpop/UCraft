@@ -275,7 +275,7 @@ void gamePlayerLocalTick(player_t *currentPlayer)
                     }
                 }
 
-                PlayS2Copenscreen(currentPlayer, 1, 12, "Crafting");
+                PlayS2Copenscreen(currentPlayer, 1, WINDOW_CRAFTING, "Crafting");
             }
             else
             {

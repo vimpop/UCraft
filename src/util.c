@@ -3,7 +3,7 @@
 void hexDump(char *desc, void *addr, int len)
 {
   int i;
-  unsigned char buff[17];
+  unsigned char buff[17] = {0};
   unsigned char *pc = (unsigned char *)addr;
 
   // Output description if given.

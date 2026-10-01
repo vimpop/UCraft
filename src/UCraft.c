@@ -43,18 +43,12 @@ static void c2sHandler(readPacketVars_t *readPacketValue)
             if (compsize > 0)
             {
                 printl(LOG_WARN, "UNIMPLEMENTED inbound compressed packet size:%d\n", compsize);
-                if (readPacketValue->pktbytes)
-                {
-                    while (readPacketValue->pktbytes)
-                    {
-                        // printf("%02x ", readByte());
-                        readByte();
-                    }
-                }
+                while (readPacketValue->pktbytes) readByte();
                 continue;
             }
         }
         uint8_t cmd = readByte();
+        if (readFailed()) { readReject(); return; }
         switch (currentPlayer->handshake_status)
         {
         case 0:
@@ -66,10 +60,12 @@ static void c2sHandler(readPacketVars_t *readPacketValue)
                     printl(LOG_WARN, "client not supported! version:%d\n", protocol_version);
                     currentPlayer->remove_player_event = 1;
                 }
-                uint8_t buf[255];
-                readString((char *)buf, 255);
+                uint8_t buf[256];
+                readString((char *)buf, sizeof(buf));
                 readShort();
-                currentPlayer->handshake_status = readVarInt();
+                int32_t next_state = readVarInt();
+                if (readFailed() || (next_state != 1 && next_state != 2)) { readReject(); return; }
+                currentPlayer->handshake_status = (uint8_t)next_state;
             }
             break;
         case 1: // status state
@@ -80,6 +76,7 @@ static void c2sHandler(readPacketVars_t *readPacketValue)
                 break;
             case 0x01:
                 readBuffer(currentPlayer->ping_payload, sizeof(currentPlayer->ping_payload));
+                if (readFailed()) return;
                 currentPlayer->ping_event = 1;
                 break;
             default:
@@ -97,6 +94,7 @@ static void c2sHandler(readPacketVars_t *readPacketValue)
                     continue;
                 }
                 readString((char *)currentPlayer->name, sizeof(((player_t *)0)->name));
+                if (readFailed()) return;
                 // check the player name
                 if (playerCheckName(currentPlayer))
                 {
@@ -138,10 +136,13 @@ static void c2sHandler(readPacketVars_t *readPacketValue)
 #else
                 currentPlayer->login_event = 1;
 #endif /*ONLINE_MODE_AUTH*/
-                currentPlayer->encryption_recv_event = 1;
+                if (currentPlayer->encryption_verified) currentPlayer->encryption_recv_event = 1;
 #endif /*ONLINE_MODE*/
                 break;
             case 3: // Login Acknowledged
+#ifdef ONLINE_MODE
+                if (!currentPlayer->encryption_verified) { readReject(); return; }
+#endif
                 currentPlayer->configuration_event = 1;
                 currentPlayer->handshake_status = 3;
             default:
@@ -160,6 +161,7 @@ static void c2sHandler(readPacketVars_t *readPacketValue)
                     }
                 }
             }
+            else readReject();
             break;
         case 4: // play state
             if (cmd < C2S_PLAY_MAPPING_LEN)
@@ -173,6 +175,7 @@ static void c2sHandler(readPacketVars_t *readPacketValue)
                     }
                 }
             }
+            else readReject();
             break;
         default:
             // invalid state
@@ -180,6 +183,7 @@ static void c2sHandler(readPacketVars_t *readPacketValue)
             currentPlayer->remove_player_event = 1;
             break;
         }
+        if (readFailed()) return;
         // empty the packet buffer
         if (readPacketValue->pktbytes)
         {
@@ -379,8 +383,8 @@ static void s2cHandler()
                 {
                     currentPlayer->yaw += 360;
                 }
-                currentPlayer->nyaw = (uint8_t)((int8_t)(currentPlayer->yaw * (float)(256.00F / 360.00F)));
-                currentPlayer->npitch = (uint8_t)((int8_t)(currentPlayer->pitch * (float)(256.00F / 360.00F)));
+                currentPlayer->nyaw = (uint8_t)((int16_t)(currentPlayer->yaw * (float)(256.00F / 360.00F)));
+                currentPlayer->npitch = (uint8_t)((int16_t)(currentPlayer->pitch * (float)(256.00F / 360.00F)));
                 // check if the player has moved since the last packet
                 if (currentPlayer->x != currentPlayer->px || currentPlayer->y != currentPlayer->py || currentPlayer->z != currentPlayer->pz)
                 {
@@ -500,6 +504,7 @@ void UCraftCleanup()
     if (server_fd >= 0)
     {
         U_close(server_fd);
+        server_fd = -1;
     }
     U_wrapperEnd();
 }
@@ -512,6 +517,7 @@ int UCraftStart(uint8_t *cleanup_flag)
     struct timeval timeout;
     int rv;
     int max_sock = 0;
+    main_tick = 0;
     U_wrapperStart();
     if (cleanup_flag == NULL)
     {
@@ -580,6 +586,7 @@ int UCraftStart(uint8_t *cleanup_flag)
         rv = U_select(max_sock + 1, &set, NULL, NULL, &timeout);
         if (rv == -1)
         {
+            if (errno == EINTR) continue;
             printl(LOG_ERROR, "select error fd:%d\n", server_fd);
             break;
         }
@@ -624,10 +631,7 @@ int UCraftStart(uint8_t *cleanup_flag)
                     // printl(LOG_INFO, "removing player due to flag\n");
                     playerRemove(player);
                     player = NULL;
-                    if (playerGetHead() == NULL)
-                    {
-                        break;
-                    }
+                    if (playerGetHead() == NULL) break;
                     continue;
                 }
                 if (FD_ISSET(player->fd, &set))
@@ -641,16 +645,10 @@ int UCraftStart(uint8_t *cleanup_flag)
                         //  player->player_fd);
                         playerRemove(player);
                         player = NULL;
-                        if (playerGetHead() == NULL)
-                        {
-                            break;
-                        }
+                        if (playerGetHead() == NULL) break;
                         continue;
                     }
-                    if (read_size > 0)
-                    {
-                        readPacketValue->pktsize = read_size;
-                    }
+                    if (read_size > 0) readPacketValue->pktsize = read_size;
 #ifdef ONLINE_MODE
                     if (player->encryption_recv_event)
                     {

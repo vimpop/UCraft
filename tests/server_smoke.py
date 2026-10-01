@@ -93,7 +93,8 @@ def connect_when_ready(process, port):
 def query(sock, port, protocol, max_players, payload):
     host = b"localhost"
     handshake = b"\x00" + varint(protocol) + varint(len(host)) + host + struct.pack(">H", port) + b"\x01"
-    sock.sendall(packet(handshake) + packet(b"\x00"))
+    request = packet(handshake) + packet(b"\x00")
+    sock.sendall(request)
     body = receive_packet(sock)
     packet_id, offset = decode_varint(body)
     require(packet_id == 0, f"Expected status response, got packet {packet_id}")

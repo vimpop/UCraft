@@ -162,9 +162,48 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  source-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Install analysis tools
+        run: sudo apt-get update && sudo apt-get install -y clang clang-tidy llvm
+      - name: Configure coverage
+        run: >
+          cmake -S . -B build
+          -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON
+          -DUCRAFT_TCP_TESTS=ON -DUCRAFT_COVERAGE=ON
+      - name: Analyze production sources
+        run: python3 tests/analyze.py --build build
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Test
+        working-directory: build
+        run: ctest --output-on-failure --no-tests=error --output-junit test-results.xml
+      - name: Report coverage
+        if: always()
+        run: python3 tests/coverage.py --build build
+      - name: Upload source audit reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-audit-Linux
+          path: |
+            build/analysis/
+            build/coverage/
+            build/test-results.xml
+            build/Testing/Temporary/*.log
+            build/tests/server-smoke.log
+          if-no-files-found: warn
+          retention-days: 7
+
   release:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build, sanitizers]
+    needs: [build, sanitizers, source-audit]
     runs-on: ubuntu-latest
 
     steps:

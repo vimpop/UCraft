@@ -121,48 +121,27 @@ void storageInventoryInsertItem(player_t *currentPlayer, int32_t item_id, int16_
         return;
     }
     storage_t *storage = get_storage(currentPlayer);
-    // try storing it for the slots below
-    for (int i = 36; i < 44; i++)
+    if (storage == NULL) { currentPlayer->remove_player_event = 1; return; }
+    // Fill matching stacks, then empty slots, in hotbar-first order.
+    for (int pass = 0; pass < 2 && count > 0; pass++)
     {
-        if (storage->inventory_slots[i].item_id == item_id)
+        for (int index = 0; index < 36 && count > 0; index++)
         {
-            // full stack
-            if (storage->inventory_slots[i].count >= 64)
+            int slot = index < 9 ? 36 + index : index;
+            inventory_slots_t *entry = &storage->inventory_slots[slot];
+            if ((pass == 0 && entry->item_id == item_id) || (pass == 1 && entry->item_id == 0))
             {
-                continue;
+                int room = 64 - entry->count;
+                if (room <= 0) continue;
+                int16_t amount = count < room ? count : (int16_t)room;
+                entry->item_id = item_id;
+                entry->count += amount;
+                count -= amount;
             }
-            storage->inventory_slots[i].count += count;
-            return;
-        }
-        if (storage->inventory_slots[i].item_id == 0)
-        {
-            storage->inventory_slots[i].item_id = item_id;
-            storage->inventory_slots[i].count = count;
-            return;
         }
     }
-    // try the remaining slots
-    for (int i = 9; i < 35; i++)
-    {
-        if (storage->inventory_slots[i].item_id == item_id)
-        {
-            // full stack
-            if (storage->inventory_slots[i].count >= 64)
-            {
-                continue;
-            }
-            storage->inventory_slots[i].count += count;
-            return;
-        }
-        if (storage->inventory_slots[i].item_id == 0)
-        {
-            storage->inventory_slots[i].item_id = item_id;
-            storage->inventory_slots[i].count = count;
-            return;
-        }
-    }
-    // well i dont know what to do in this case.
-    // TODO: implement the case when inventory is full
+    // No drop entities are implemented: any remainder cannot be stored.
+
 }
 
 void storageInventoryUpdate(player_t *currentPlayer)
@@ -172,6 +151,7 @@ void storageInventoryUpdate(player_t *currentPlayer)
         return;
     }
     storage_t *storage = get_storage(currentPlayer);
+    if (storage == NULL) { currentPlayer->remove_player_event = 1; return; }
     // crafting entries cannot be there
     for (int i = 1; i <= 4; i++)
     {

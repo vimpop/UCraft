@@ -79,8 +79,8 @@ static uint32_t hash_position_3d(int32_t x, int32_t y, int32_t z, uint32_t seed)
 static void generate_terrain_heightmap(int32_t chunk_x, int32_t chunk_z, int32_t world_seed)
 {
     float height_grid[5][5];
-    const int32_t chunk_world_x = chunk_x << 4;
-    const int32_t chunk_world_z = chunk_z << 4;
+    const int32_t chunk_world_x = chunk_x * 16;
+    const int32_t chunk_world_z = chunk_z * 16;
     const float continental_frequency = 0.0125f; // 1 / 80
     const float hills_frequency = 0.03125f;      // 1 / 32
     const float detail_frequency = 0.1f;         // 1 / 10
@@ -169,8 +169,8 @@ static void generate_terrain_heightmap(int32_t chunk_x, int32_t chunk_z, int32_t
 static void generate_basin_depth_map(int32_t chunk_x, int32_t chunk_z, int32_t world_seed)
 {
     float basin_grid[5][5];
-    const int32_t chunk_world_x = chunk_x << 4;
-    const int32_t chunk_world_z = chunk_z << 4;
+    const int32_t chunk_world_x = chunk_x * 16;
+    const int32_t chunk_world_z = chunk_z * 16;
     const float basin_frequency = 0.010f;  // 1 / 100
     const float detail_frequency = 0.035f; // 1 / 28.57
     const uint8_t basin_seed = derive_seed(world_seed, 5u);
@@ -232,8 +232,8 @@ static void generate_basin_depth_map(int32_t chunk_x, int32_t chunk_z, int32_t w
 
 static void generate_tree_origin_map(int32_t chunk_x, int32_t chunk_z, int32_t world_seed)
 {
-    const int32_t chunk_world_x = chunk_x << 4;
-    const int32_t chunk_world_z = chunk_z << 4;
+    const int32_t chunk_world_x = chunk_x * 16;
+    const int32_t chunk_world_z = chunk_z * 16;
     const float forest_frequency = 0.040f; // 1 / 25
     const uint8_t forest_seed = derive_seed(world_seed, 10u);
     const uint32_t hash_seed = derive_seed(world_seed, 11u);
@@ -394,8 +394,8 @@ static void generate_surface_decoration_map(int32_t chunk_x, int32_t chunk_z, in
 {
     float density_grid[5][5];
     float type_grid[5][5];
-    const int32_t chunk_world_x = chunk_x << 4;
-    const int32_t chunk_world_z = chunk_z << 4;
+    const int32_t chunk_world_x = chunk_x * 16;
+    const int32_t chunk_world_z = chunk_z * 16;
     const float density_frequency = 0.070f; // 1 / 14.29
     const float type_frequency = 0.030f;    // 1 / 33.33
     const float detail_frequency = 0.180f;  // 1 / 5.56
@@ -497,8 +497,8 @@ static void generate_cave_map(int32_t chunk_x, int32_t chunk_z, int32_t world_se
     {
         for (int32_t gx = 0; gx < 5; gx++)
         {
-            int32_t sample_world_x = (chunk_x << 4) + (gx << 2);
-            int32_t sample_world_z = (chunk_z << 4) + (gz << 2);
+            int32_t sample_world_x = (chunk_x * 16) + (gx << 2);
+            int32_t sample_world_z = (chunk_z * 16) + (gz << 2);
 
             cave_base_grid[gz][gx] = stb_perlin_noise3_seed(
                 (float)sample_world_x * base_frequency,
@@ -573,8 +573,8 @@ static void generate_ore_map(int32_t chunk_x, int32_t chunk_z, int32_t world_see
     {
         for (int32_t gx = 0; gx < 5; gx++)
         {
-            int32_t sample_world_x = (chunk_x << 4) + (gx << 2);
-            int32_t sample_world_z = (chunk_z << 4) + (gz << 2);
+            int32_t sample_world_x = (chunk_x * 16) + (gx << 2);
+            int32_t sample_world_z = (chunk_z * 16) + (gz << 2);
 
             float detail_noise = stb_perlin_noise3_seed(
                 (float)sample_world_x * detail_frequency,
@@ -914,13 +914,14 @@ static void generate_cave_heightmaps(int32_t chunk_x, int32_t chunk_z)
 
 int worldGetBlock(int32_t x, int32_t y, int32_t z)
 {
+    if (y < -64 || y >= 320) return MINECRAFT_AIR;
     // TODO: Add caching later
     int palette;
     int32_t section_y = (y + 64) >> 4;
     int32_t chunk_x = x >> 4;
     int32_t chunk_z = z >> 4;
-    uint8_t local_chunk_x = (uint8_t)(x - (chunk_x << 4));
-    uint8_t local_chunk_z = (uint8_t)(z - (chunk_z << 4));
+    uint8_t local_chunk_x = (uint8_t)((uint32_t)x & 15u);
+    uint8_t local_chunk_z = (uint8_t)((uint32_t)z & 15u);
 
     if (section_y >= 5 && section_y <= 7)
     {
@@ -950,7 +951,7 @@ int worldGetBlock(int32_t x, int32_t y, int32_t z)
 void worldGenerateChunk(int32_t chunk_x, int32_t chunk_z, size_t from, size_t to)
 {
 
-    if ((int)(to - from) < 0)
+    if (from > to || to >= 24)
     {
         return;
     }
@@ -959,12 +960,11 @@ void worldGenerateChunk(int32_t chunk_x, int32_t chunk_z, size_t from, size_t to
 
     for (size_t i = 0; i < 24; i++)
     {
-        if ((i == from) && (from <= to))
+        if (i >= from && i <= to && i >= 3 && i <= 7)
         {
             memset(block_data, 0, sizeof(block_data));
             populate_cave_sections(chunk_x, chunk_z, i);
             populate_surface_sections(i);
-            from++;
         }
         else
         {

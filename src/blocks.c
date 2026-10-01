@@ -52,6 +52,7 @@ static bool coordmap_init()
     coordinate_map.entries = U_calloc(coordinate_map.capacity, sizeof(HashEntry));
     if (!coordinate_map.entries)
     {
+        coordinate_map.capacity = 0;
         return false;
     }
     return true;
@@ -68,10 +69,11 @@ static void coordmap_free()
 
 static bool coordmap_insert_raw(uint64_t key, Blocks *blocks)
 {
+    if (!coordinate_map.capacity) return 0;
     size_t slot = hash_u64(key) % coordinate_map.capacity;
     size_t first_deleted = SIZE_MAX;
 
-    while (true)
+    for (size_t probes = 0; probes < coordinate_map.capacity; probes++)
     {
         HashEntry *entry = &coordinate_map.entries[slot];
 
@@ -102,6 +104,13 @@ static bool coordmap_insert_raw(uint64_t key, Blocks *blocks)
 
         slot = (slot + 1) % coordinate_map.capacity;
     }
+    if (first_deleted != SIZE_MAX)
+    {
+        coordinate_map.entries[first_deleted] = (HashEntry){key, blocks, SLOT_OCCUPIED};
+        coordinate_map.count++;
+        return true;
+    }
+    return false;
 }
 
 static bool coordmap_grow()
@@ -144,6 +153,7 @@ static bool coordmap_grow()
 
 static bool coordmap_insert(int32_t x, int32_t z, Blocks *blocks)
 {
+    if (!coordinate_map.capacity && !coordmap_init()) return false;
     uint64_t key = pack_coord(x, z);
 
     if ((coordinate_map.count + 1) * 100 / coordinate_map.capacity > COORDMAP_MAX_LOAD_PERCENT)
@@ -160,9 +170,10 @@ static bool coordmap_insert(int32_t x, int32_t z, Blocks *blocks)
 static Blocks *coordmap_get(int32_t x, int32_t z)
 {
     uint64_t key = pack_coord(x, z);
+    if (!coordinate_map.capacity) return 0;
     size_t slot = hash_u64(key) % coordinate_map.capacity;
 
-    while (true)
+    for (size_t probes = 0; probes < coordinate_map.capacity; probes++)
     {
         HashEntry *entry = &coordinate_map.entries[slot];
 
@@ -176,14 +187,16 @@ static Blocks *coordmap_get(int32_t x, int32_t z)
         }
         slot = (slot + 1) % coordinate_map.capacity;
     }
+    return NULL;
 }
 
 static bool coordmap_remove(int32_t x, int32_t z)
 {
     uint64_t key = pack_coord(x, z);
+    if (!coordinate_map.capacity) return 0;
     size_t slot = hash_u64(key) % coordinate_map.capacity;
 
-    while (true)
+    for (size_t probes = 0; probes < coordinate_map.capacity; probes++)
     {
         HashEntry *entry = &coordinate_map.entries[slot];
 
@@ -201,6 +214,7 @@ static bool coordmap_remove(int32_t x, int32_t z)
 
         slot = (slot + 1) % coordinate_map.capacity;
     }
+    return false;
 }
 
 void blocksInit()
@@ -268,9 +282,12 @@ bool blocksUpdate(blocksDefaultState state, int32_t x, int16_t y, int32_t z)
             return false;
         }
         blocks->block = U_calloc(BLOCKS_INITAL_CAPACITY, sizeof(Block));
+        if (!blocks->block) { U_free(blocks); return false; }
         blocks->size = BLOCKS_INITAL_CAPACITY;
         if (!coordmap_insert(chunk_x, chunk_z, blocks))
         {
+            U_free(blocks->block);
+            U_free(blocks);
             return false;
         }
     }
@@ -311,13 +328,14 @@ bool blocksUpdate(blocksDefaultState state, int32_t x, int16_t y, int32_t z)
     if (blocks->count >= blocks->size)
     {
         Block *new_block = NULL;
-        blocks->size += BLOCKS_INITAL_CAPACITY;
-        new_block = U_realloc(blocks->block, sizeof(Block) * blocks->size);
+        size_t new_size = blocks->size + BLOCKS_INITAL_CAPACITY;
+        new_block = U_realloc(blocks->block, sizeof(Block) * new_size);
         if (new_block == NULL)
         {
             return false;
         }
         blocks->block = new_block;
+        blocks->size = new_size;
     }
     blocks->block[blocks->count].default_state = state;
     blocks->block[blocks->count].c.x = local_x;

@@ -42,71 +42,38 @@ int encryptionBegin()
 
     return 0;
 }
-static int bytes_to_hexstring(char hexstr[45], unsigned char bytes[20], int len, uint8_t neg)
+// Format the signed 160-bit digest without leading zeroes.
+void encryptionHexDigest(unsigned char dest[45], unsigned char src[20], size_t capacity)
 {
-    static const char hexchars[] = "0123456789abcdef";
-    int i;
-    int shift = 0;
-    for (i = 0; i < len; i++)
+    static const char digits[] = "0123456789abcdef";
+    if (!dest || !capacity) return;
+    uint8_t magnitude[20];
+    memcpy(magnitude, src, sizeof(magnitude));
+    int negative = (magnitude[0] & 0x80) != 0;
+    if (negative)
     {
-        // remove the first trailing 0
-        if ((bytes[i] & 0xF0) == 0 && i == 0)
+        unsigned carry = 1;
+        for (int i = 19; i >= 0; i--)
         {
-            shift = 1;
-            if (neg)
-            {
-                hexstr[i * 2 + shift] = '-';
-            }
-            hexstr[i * 2 + 1 + shift] = hexchars[bytes[i] & 0xF];
-            continue;
+            unsigned value = (unsigned)(uint8_t)~magnitude[i] + carry;
+            magnitude[i] = (uint8_t)value;
+            carry = value >> 8;
         }
-        hexstr[i * 2 + shift] = hexchars[(bytes[i] >> 4) & 0xF];
-        hexstr[i * 2 + 1 + shift] = hexchars[bytes[i] & 0xF];
     }
-    hexstr[i * 2 + shift] = '\0';
-    if (shift)
+    char text[42];
+    size_t used = 0;
+    if (negative) text[used++] = '-';
+    int started = 0;
+    for (size_t i = 0; i < 40; i++)
     {
-        return 2 - (neg & 1);
+        unsigned nibble = (magnitude[i / 2] >> (i % 2 ? 0 : 4)) & 15;
+        if (!started && !nibble && i != 39) continue;
+        started = 1;
+        text[used++] = digits[nibble];
     }
-    else
-    {
-        return 0;
-    }
-}
-
-// generate a minecraft style hexdigest
-//  TODO: this could be buggy, add some testing later
-void encryptionHexDigest(unsigned char dest[45], unsigned char src[20], size_t len)
-{
-    uint8_t hash[20];
-    char hash_dest[45];
-    uint8_t shift_byte = 0;
-    memcpy(hash, src, 20);
-    memset(hash_dest, 0, 45);
-    if (hash[0] & 0x80)
-    {
-        // perform one's complement
-        int i = 0;
-        for (; i < 20; i++)
-        {
-            hash[i] = ~hash[i];
-        }
-        // add one
-        for (i = 19; i >= 0; i--)
-        {
-            if (hash[i] == 0xFF)
-            {
-                hash[i] = 0;
-                continue;
-            }
-            hash[i]++;
-            break;
-        }
-        shift_byte = 1;
-        hash_dest[0] = '-';
-    }
-    int skip = bytes_to_hexstring(hash_dest + shift_byte, hash, 20, shift_byte);
-    memcpy(dest, &hash_dest[skip], strnlen(&hash_dest[skip], len - skip) + 1);
+    if (used >= capacity) used = capacity - 1;
+    memcpy(dest, text, used);
+    dest[used] = 0;
 }
 void LoginC2S_encryption_response()
 {
@@ -123,6 +90,7 @@ void LoginC2S_encryption_response()
         return;
     }
     readBuffer((char *)encrypted, sizeof(encrypted));
+    if (readFailed()) return;
     ret = mbedtls_rsa_rsaes_pkcs1_v15_decrypt(mbedtls_pk_rsa(encryptionData.key), mbedtls_ctr_drbg_random, &encryptionData.ctr_drbg, &decrypted_size, encrypted, decrypted, sizeof(decrypted));
     if (ret != 0)
     {
@@ -145,6 +113,7 @@ void LoginC2S_encryption_response()
         return;
     }
     readBuffer((char *)encrypted, sizeof(encrypted));
+    if (readFailed()) return;
     ret = mbedtls_rsa_rsaes_pkcs1_v15_decrypt(mbedtls_pk_rsa(encryptionData.key), mbedtls_ctr_drbg_random, &encryptionData.ctr_drbg, &decrypted_size, encrypted, decrypted, sizeof(decrypted));
     if (ret != 0)
     {
